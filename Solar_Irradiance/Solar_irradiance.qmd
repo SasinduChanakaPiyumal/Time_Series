@@ -1,0 +1,153 @@
+---
+title: " Spatiotemporal interpolation and forecast of irradiance data using Kriging"
+format: html
+editor: visual
+---
+
+## Load required packages
+
+```{r, warning=FALSE}
+library(gstat)
+library(sp)
+library(fields)
+library(raster)
+library(geoR)
+library(ggplot2)
+```
+
+### 1. Simulated Data - Generate Synthetic Solar Irradiance Data
+
+```{r}
+set.seed(123)
+n <- 100  # Number of observation points
+grid <- data.frame(
+  x = runif(n, min = 0, max = 100),  # Random spatial locations
+  y = runif(n, min = 0, max = 100),
+  time = rep(seq(1, 10, by = 1), each = n/10)  # Time steps
+)
+```
+
+#### Generate synthetic irradiance values with spatial correlation & Convert to spatial object
+
+```{r}
+grid$irradiance <- 1000 * exp(-0.01 * grid$x) + rnorm(n, mean = 0, sd = 50)
+coordinates(grid) <- ~x + y
+```
+
+### 2. Compute Empirical Variogram
+
+```{r}
+variogram_model <- variogram(irradiance ~ 1, data = grid)
+plot(variogram_model, main = "Empirical Variogram")
+```
+
+### 3. Fit Parametric Variogram Model
+
+```{r}
+vgm_model <- fit.variogram(variogram_model, vgm(1, "Sph", 30, 1))
+plot(variogram_model, model = vgm_model, main = "Fitted Variogram Model")
+```
+
+### 4. Perform Ordinary Kriging
+
+```{r}
+# Define new locations for prediction
+pred_grid <- expand.grid(x = seq(0, 100, length.out = 50), 
+                         y = seq(0, 100, length.out = 50))
+coordinates(pred_grid) <- ~x + y
+
+# Apply Kriging interpolation
+kriging_result <- krige(irradiance ~ 1, grid, pred_grid, model = vgm_model)
+
+# Convert results to data frame
+kriging_df <- as.data.frame(kriging_result)
+
+# Plot Kriging Interpolation
+ggplot(kriging_df, aes(x = x, y = y, fill = var1.pred)) +
+  geom_tile() +
+  scale_fill_gradient(low = "yellow", high = "red") +
+  labs(title = "Kriging Interpolated Irradiance", fill = "Irradiance (W/m²)")
+```
+
+### 5. Estimate Cloud Motion Using Cross-Correlation
+#### Create time-lagged dataset
+```{r}
+lagged_data <- data.frame(
+  x = grid$x,
+  y = grid$y,
+  irradiance_t1 = grid$irradiance,
+  irradiance_t2 = c(grid$irradiance[-1], NA)  # Shifted by one time step
+)
+
+```
+#### Remove NA values
+```{r}
+lagged_data <- na.omit(lagged_data)
+```
+#### Compute cross-correlation
+```{r}
+cloud_motion <- cor(lagged_data$irradiance_t1, lagged_data$irradiance_t2)
+```
+#### Estimated cloud motion
+```{r}
+print(paste("Estimated cloud motion correlation:", round(cloud_motion, 3)))
+```
+
+### 6. Spatiotemporal Kriging (Interpolating Across Time & Space)
+#### Fit spatiotemporal variogram
+```{r}
+st_variogram <- variogram(irradiance ~ 1, data = grid, cutoff = 50, width = 5)
+```
+#### Fit spatiotemporal model
+```{r}
+st_model <- fit.variogram(st_variogram, vgm(1, "Sph", 30, 1))
+```
+#### Perform spatiotemporal Kriging
+```{r}
+kriging_st_result <- krige(irradiance ~ 1, grid, pred_grid, model = st_model)
+```
+#### Convert results to data frame
+```{r}
+kriging_st_df <- as.data.frame(kriging_st_result)
+```
+#### Plot Spatiotemporal Kriging Result
+```{r}
+ggplot(kriging_st_df, aes(x = x, y = y, fill = var1.pred)) +
+  geom_tile() +
+  scale_fill_gradient(low = "yellow", high = "red") +
+  labs(title = "Spatiotemporal Kriging Interpolated Irradiance", fill = "Irradiance (W/m²)")
+```
+
+### 7. Compute Errors and Validate Results
+#### Cross-validation using Leave-One-Out (LOO)
+```{r}
+cv_result <- krige.cv(irradiance ~ 1, grid, model = vgm_model, nfold = 10)
+```
+#### Compute RMSE
+```{r}
+rmse <- sqrt(mean((cv_result$residual)^2))
+print(paste("Root Mean Square Error (RMSE):", round(rmse, 2)))
+```
+#### Compute Normalized RMSE (nRMSE)
+```{r}
+nrmse <- rmse / mean(grid$irradiance) * 100
+print(paste("Normalized RMSE (nRMSE):", round(nrmse, 2), "%"))
+```
+#### Compute Skill Ratio (SR)
+```{r}
+persistence_model_rmse <- sqrt(mean((grid$irradiance - mean(grid$irradiance))^2))
+skill_ratio <- 1 - (rmse / persistence_model_rmse)
+print(paste("Skill Ratio (SR):", round(skill_ratio, 2)))
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
