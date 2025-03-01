@@ -1,0 +1,294 @@
+---
+title: " Spatiotemporal interpolation and forecast of irradiance data using Kriging"
+format: html
+editor: visual
+---
+
+## Load required libraries
+
+```{r}
+library(gstat)
+library(sp)
+library(fields)
+library(ggplot2)
+library(dplyr)
+library(MASS)
+
+set.seed(42)
+```
+
+## Define parameters
+
+```{r}
+grid_size_x <- 64   # Number of spatial points in X
+grid_size_y <- 64   # Number of spatial points in Y
+grid_size <- 64
+time_steps <- 10
+domain_size <- 100
+dt <- 10
+cloud_direction <- 180
+cloud_speed <- 2.61
+spatial_decay <- 0.8  # Spatial correlation decay
+spatial_variance <- 1  # Variance of spatial field
+temporal_decay <- 0.05  # Temporal correlation factor
+```
+
+## Generate a 2D spatial grid
+
+```{r}
+x <- seq(0, domain_size, length.out = grid_size_x)
+y <- seq(0, domain_size, length.out = grid_size_y)
+grid <- expand.grid(x = x, y = y)
+```
+
+## Function to simulate cloud movement
+
+```{r}
+simulate_clouds <- function(grid, time_step) {
+  # Generate spatial noise (random cloud patterns)
+  noise <- matrix(rnorm(grid_size^2, mean = 0.5, sd = 0.2), grid_size, grid_size)
+  
+  # Apply Gaussian smoothing for realistic cloud patterns
+  noise <- smooth.spline(noise)$y
+  noise <- matrix(noise, grid_size, grid_size)
+  
+  # Simulate cloud displacement over time using velocity
+  dx_move <- cloud_speed * dt * cos(cloud_direction * pi / 180) * time_step
+  dy_move <- cloud_speed * dt * sin(cloud_direction * pi / 180) * time_step
+  
+  # Shift the cloud pattern
+  shifted_noise <- cbind(noise[, -1], noise[, 1])  # Shift left for wind effect
+  
+  return(shifted_noise)}
+```
+
+## Simulate irradiance over time
+
+```{r}
+irradiance_data <- array(dim = c(grid_size_x, grid_size_y, time_steps))
+for (t in 1:time_steps) {
+  irradiance_data[, , t] <- simulate_clouds(grid, t)}
+```
+
+## Convert to clear-sky index (kt)
+
+```{r}
+clear_sky_irradiance <- 1000
+kt <- irradiance_data / max(irradiance_data)
+
+pre_df <- data.frame(
+  x = rep(x, each = grid_size),
+  y = rep(y, grid_size),
+  kt = as.vector(kt[, , 1])
+)
+head(pre_df)
+```
+
+## Plot irradiance Data
+
+```{r}
+ggplot(pre_df, aes(x = x, y = y, fill = kt)) +  
+  geom_tile() +
+  scale_fill_gradient(low = "yellow", high = "red") +
+  ggtitle("Before Ordinary Kriging Interpolation") +
+  xlab("X Coordinate") + ylab("Y Coordinate") +
+  theme_minimal()
+```
+
+## Convert to Spatial Object
+
+```{r}
+coordinates(pre_df) <- ~x + y
+```
+
+## Compute isotropic variogram
+
+```{r}
+iso_variogram <- variogram(kt ~ 1,data=pre_df)
+plot(iso_variogram, main = "Isotropic Variogram")
+```
+
+## Compute anisotropic variogram with direction-specific lags
+
+```{r}
+aniso_variogram <- variogram(kt ~ 1, data = pre_df, alpha = c(0, 45, 90, 135))
+plot(aniso_variogram, main = "Anisotropic Variogram (Different Directions)")
+```
+
+## Modify initial values based on empirical plot observations
+
+```{r}
+initial_sill <- max(iso_variogram$gamma)  # Sill: Max value of gamma
+initial_range <- mean(iso_variogram$dist[which.max(iso_variogram$gamma)])  # Range: Distance where variogram flattens
+initial_nugget <- min(iso_variogram$gamma)  # Nugget: Smallest value of gamma at zero distance (or set to 0)
+```
+
+## Try Gaussian model
+
+```{r}
+iso_model <- fit.variogram(iso_variogram, vgm(psill = initial_sill, model = "Gau", range = initial_range, nugget = initial_nugget))
+```
+
+## Plot isotropic variogram model
+
+```{r}
+plot(iso_variogram, model = iso_model, main = "Fitted Isotropic Variogram")
+```
+
+# Define anisotropic variogram model
+
+```{r}
+aniso_model <- vgm(
+  psill = 0.8,      # Sill
+  model = "Gau",    # Model type: Exponential
+  range = 10,       # Range for the isotropic (first) direction
+  nugget = 0.1,     # Nugget
+  anis = c(45, 1)   # Anisotropy direction (45 degrees) and ratio (1 means no scaling)
+)
+```
+
+## Fit the variogram model to the data (e.g., aniso_variogram)
+
+```{r}
+fitted_aniso_model <- fit.variogram(aniso_variogram, aniso_model)
+```
+
+## Print the fitted parameters
+
+```{r}
+print(fitted_aniso_model)
+```
+
+## Plot anisotropic variogram model
+
+```{r}
+plot(aniso_variogram, model = aniso_model, main = "Fitted Anisotropic Variogram")
+```
+
+## Define a regular grid for interpolation
+
+```{r}
+grid <- expand.grid(x = seq(0, 50, length.out = 50), y = seq(0, 50, length.out = 50))
+coordinates(grid) <- ~x + y
+gridded(grid) <- TRUE
+```
+
+## Apply isotropic kriging
+
+```{r}
+iso_kriged <- krige(kt ~ 1, pre_df, grid, model = iso_model)
+```
+
+## Plot results
+
+```{r}
+spplot(iso_kriged["var1.pred"], main = "Isotropic Kriging Prediction")
+```
+
+## Apply anisotropic kriging
+
+```{r}
+aniso_kriged <- krige(kt ~ 1, pre_df, grid, model = aniso_model)
+```
+
+## Plot results
+
+```{r}
+spplot(aniso_kriged["var1.pred"], main = "Anisotropic Kriging Prediction")
+```
+
+## Convert isotropic kriging results to data frame
+
+```{r}
+iso_kriged_df <- as.data.frame(iso_kriged)
+```
+
+## Convert anisotropic kriging results to data frame
+
+```{r}
+aniso_kriged_df <- as.data.frame(aniso_kriged)
+```
+
+# Compute Errors and Validate Results
+
+## Isotropic kriging
+### Cross-validation using Leave-One-Out (LOO)
+
+```{r}
+cv_result_iso <- krige.cv(kt ~ 1, pre_df, model = vgm(psill = initial_sill, model = "Gau", range = initial_range, nugget = initial_nugget), nfold = 10)
+```
+
+# Compute RMSE
+
+```{r}
+rmse_iso <- sqrt(mean((cv_result_iso$residual)^2))
+print(paste("Root Mean Square Error (RMSE):", round(rmse_iso, 2)))
+```
+
+# Compute Normalized RMSE (nRMSE)
+
+```{r}
+nrmse <- rmse_iso / mean(pre_df$kt) * 100
+print(paste("Normalized RMSE (nRMSE):", round(nrmse, 2), "%"))
+```
+
+# Compute Skill Ratio (SR)
+
+```{r}
+iso_model_rmse <- sqrt(mean((pre_df$kt - mean(pre_df$kt))^2))
+skill_ratio <- 1 - (rmse_iso / iso_model_rmse)
+print(paste("Skill Ratio (SR):", round(skill_ratio, 2)))
+```
+
+## anisotropic kriging
+# Cross-validation using Leave-One-Out (LOO)
+
+```{r}
+cv_result_aniso <- krige.cv(kt ~ 1, pre_df, model = aniso_model, nfold = 10)
+```
+
+# Compute RMSE
+
+```{r}
+rmse <- sqrt(mean((cv_result_aniso$residual)^2))
+print(paste("Root Mean Square Error (RMSE):", round(rmse, 2)))
+```
+
+# Compute Normalized RMSE (nRMSE)
+
+```{r}
+nrmse <- rmse / mean(pre_df$kt) * 100
+print(paste("Normalized RMSE (nRMSE):", round(nrmse, 2), "%"))
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
